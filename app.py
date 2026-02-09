@@ -1,6 +1,16 @@
+"""
+Structural AI Engine v3.0
+Five-star professional engineering simulation
+"""
 
+import streamlit as st
+import numpy as np
+import pandas as pd
+import random
 
-import streamlit as st import numpy as np import pandas as pd import random from deap import base, creator, tools, algorithms import plotly.express as px
+from deap import base, creator, tools, algorithms
+
+import plotly.express as px
 
 =========================
 
