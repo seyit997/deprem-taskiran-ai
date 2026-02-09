@@ -10,15 +10,16 @@ import plotly.express as px
 # =========================
 RNG = np.random.default_rng(42)
 TOP_K = 12
+LIB_SIZE = 3000
 
-st.set_page_config(page_title="Structural AI Engine v3.0", layout="wide")
-st.title("🏗️ Structural AI Engine v3.0 — Professional Engineering Simulator")
+st.set_page_config(page_title="Structural AI Engine v3.1", layout="wide")
+st.title("🏗️ Structural AI Engine v3.1 — Professional Engineering Simulator")
 
 # =========================
 # 1. PARAMETRIC MATERIAL PHYSICS LIBRARY
 # =========================
 @st.cache_data
-def build_material_library(n=3000):
+def build_material_library(n=LIB_SIZE):
     rows = []
     categories = {
         "Binder": {"min": 0.15, "max": 0.40, "density": 3150},
@@ -32,38 +33,27 @@ def build_material_library(n=3000):
     for i in range(n):
         cat = random.choice(list(categories.keys()))
         cfg = categories[cat]
-
-        # Latent chemistry variables
         silica = RNG.uniform(0.2, 0.8)
-        lime = RNG.uniform(0.1, 0.6)
-        organic_v = RNG.uniform(0.0, 0.5)
-        polymer_v = RNG.uniform(0.0, 0.4)
         nano_v = RNG.uniform(0.0, 0.3)
+        polymer_v = RNG.uniform(0.0, 0.4)
         water_v = RNG.uniform(0.1, 0.4)
 
-        # Correlated physics
         strength = (40 + 120 * silica + 30 * nano_v + 15 * polymer_v - 60 * water_v) / 10
-        ductility = (5 + 40 * organic_v + 60 * polymer_v + 20 * nano_v - 30 * silica) / 10
-        cost = (0.02 + 0.5 * nano_v + 0.3 * polymer_v + 0.1 * organic_v)
+        ductility = (5 + 40 * RNG.uniform(0, 0.5) + 60 * polymer_v + 20 * nano_v - 30 * silica) / 10
+        cost = (0.02 + 0.5 * nano_v + 0.3 * polymer_v)
 
         rows.append([
             f"{cat}_{i}", cat, max(0.1, strength), max(0.1, ductility), cost,
-            cfg["density"], cfg["min"], cfg["max"],
-            silica, lime, organic_v, polymer_v, nano_v, water_v
+            cfg["density"], cfg["min"], cfg["max"]
         ])
 
-    return pd.DataFrame(rows, columns=[
-        "name", "category", "strength", "ductility", "cost_kg",
-        "density", "min_lim", "max_lim",
-        "silica", "lime", "organic", "polymer", "nano", "water"
-    ])
+    return pd.DataFrame(rows, columns=["name", "category", "strength", "ductility", "cost_kg", "density", "min_lim", "max_lim"])
 
 DB = build_material_library()
 
 # =========================
 # 2. EVOLUTIONARY STRUCTURE
 # =========================
-# Creator nesnelerini güvenli bir şekilde oluşturma
 if "FitnessMax" not in creator.__dict__:
     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 if "Individual" not in creator.__dict__:
@@ -80,122 +70,92 @@ toolbox.register("individual", create_individual)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
 # =========================
-# 3. PHYSICAL MODELS
+# 3. PHYSICAL MODELS & EVALUATION
 # =========================
 def saturation(x, xmax):
     return xmax * (1 - np.exp(-x / xmax))
 
-def earthquake_damage(capacity, Sa_series):
-    damage = 0.0
-    for Sa in Sa_series:
-        damage += (Sa / capacity) ** 2
-        if damage >= 1.0:
-            return True, damage
-    return False, damage
-
-def manufacturability_penalty(df, ratios):
-    pen = 0
-    if np.sum(ratios[df['category'] == 'Nano']) > 0.02:
-        pen += 1000
-    if np.sum(ratios[df['category'] == 'Polymer']) > 0.04:
-        pen += 800
-    return pen
-
-# =========================
-# 4. FITNESS EVALUATION
-# =========================
 def evaluate(ind):
-    idx = [int(i) for i in ind[:TOP_K]]
-    raw = np.array(ind[TOP_K:])
+    # CRITICAL FIX: Ensure indices are within [0, LIB_SIZE-1] and are integers
+    idx = np.clip(np.array(ind[:TOP_K], dtype=int), 0, LIB_SIZE - 1).tolist()
+    raw = np.array(ind[TOP_K:], dtype=float)
+    
+    if np.sum(raw) <= 0: return (1.0,)
     ratios = raw / np.sum(raw)
-    sel = DB.iloc[idx]
+    
+    sel = DB.iloc[idx] # No more IndexError here
 
-    # Category constraints
+    # Constraints & Penalties
     penalty = 0
     for cat in sel['category'].unique():
         rsum = np.sum(ratios[sel['category'] == cat])
-        mn = sel[sel['category'] == cat]['min_lim'].iloc[0]
-        mx = sel[sel['category'] == cat]['max_lim'].iloc[0]
-        if rsum < mn:
-            penalty += (mn - rsum) * 5000
-        if rsum > mx:
-            penalty += (rsum - mx) * 5000
+        rows = sel[sel['category'] == cat]
+        mn, mx = rows['min_lim'].iloc[0], rows['max_lim'].iloc[0]
+        if rsum < mn: penalty += (mn - rsum) * 5000
+        if rsum > mx: penalty += (rsum - mx) * 5000
 
     strength = saturation(np.sum(ratios * sel['strength']) * 10, 150)
     duct = saturation(np.sum(ratios * sel['ductility']) * 10, 50)
     density = np.sum(ratios * sel['density'])
     cost = np.sum(ratios * sel['density'] * sel['cost_kg'])
-
+    
     capacity = (strength / (density / 1000)) * (1 + duct / 100)
-
-    # Monte Carlo earthquakes
+    
+    # Monte Carlo Failure Probability
     collapses = 0
-    runs = 30
-    for _ in range(runs):
-        Sa = RNG.lognormal(mean=0.0, sigma=0.6, size=20)
-        collapsed, _ = earthquake_damage(capacity, Sa)
-        if collapsed:
-            collapses += 1
-
-    reliability = 1 - (collapses / runs)
-    manuf_pen = manufacturability_penalty(sel, ratios)
-
-    raw_score = (strength * 2) + (duct * 1.5) + (reliability * 100)
-    aps = raw_score * reliability - (cost / 10) - penalty - manuf_pen
-
+    for _ in range(20):
+        Sa = RNG.lognormal(0.0, 0.6, 15)
+        if np.sum((Sa / capacity)**2) >= 1.0: collapses += 1
+    
+    reliability = 1 - (collapses / 20)
+    aps = (strength * 2 + duct * 1.5 + reliability * 100) * reliability - (cost / 10) - penalty
+    
     return (max(1.0, float(aps)),)
 
 toolbox.register("evaluate", evaluate)
 toolbox.register("mate", tools.cxTwoPoint)
-toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=10, indpb=0.2)
+toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=20, indpb=0.15)
 toolbox.register("select", tools.selTournament, tournsize=3)
 
 # =========================
-# 5. STREAMLIT UI
+# 4. UI & EXECUTION
 # =========================
 col1, col2 = st.columns([1, 2])
 with col1:
-    st.subheader("Simulation Settings")
-    pop_size = st.slider("Population", 200, 1200, 600)
-    gens = st.slider("Generations", 100, 1200, 400)
-    run = st.button("🚀 Run Full Professional Simulation")
+    pop_size = st.slider("Population", 200, 1000, 400)
+    gens = st.slider("Generations", 50, 500, 150)
+    run = st.button("🚀 Run Engine v3.1")
 
 if run:
-    with st.spinner("Executing Evolutionary Physics Engine..."):
+    with st.spinner("Analyzing Material Matrix..."):
         pop = toolbox.population(n=pop_size)
         hof = tools.HallOfFame(1)
-        algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.25, ngen=gens, 
-                            halloffame=hof, verbose=False)
+        algorithms.eaSimple(pop, toolbox, 0.7, 0.2, gens, halloffame=hof, verbose=False)
 
     best = hof[0]
-    idx = [int(i) for i in best[:TOP_K]]
+    idx = np.clip(np.array(best[:TOP_K], dtype=int), 0, LIB_SIZE - 1).tolist()
     ratios = np.array(best[TOP_K:])
     ratios /= np.sum(ratios)
     res = DB.iloc[idx].copy()
     res['Ratio %'] = ratios * 100
 
-    # Final Metrics Calculation
-    f_strength = saturation(np.sum(ratios * res['strength']) * 10, 150)
-    f_duct = saturation(np.sum(ratios * res['ductility']) * 10, 50)
-    f_density = np.sum(ratios * res['density'])
-    f_cost = np.sum(ratios * res['density'] * res['cost_kg'])
-    f_capacity = (f_strength / (f_density / 1000)) * (1 + f_duct / 100)
-
     st.divider()
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Realistic Strength", f"{f_strength:.1f} MPa")
-    m2.metric("Ductility", f"{f_duct:.1f}")
-    m3.metric("Cost", f"${f_cost:.2f} / m³")
-    m4.metric("Earthquake Capacity", f"{f_capacity:.1f}")
+    # Metrics
+    s_f = saturation(np.sum(ratios * res['strength']) * 10, 150)
+    d_f = saturation(np.sum(ratios * res['ductility']) * 10, 50)
+    c_f = np.sum(ratios * res['density'] * res['cost_kg'])
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Structural Strength", f"{s_f:.1f} MPa")
+    m2.metric("Ductility Index", f"{d_f:.1f}")
+    m3.metric("Final Cost", f"${c_f:.2f} / m³")
 
-    st.progress(min(1.0, f_capacity / 200), text="Adjusted Performance Score")
+    [attachment_0](attachment)
 
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Optimized Composition")
+    l, r = st.columns(2)
+    with l:
+        st.subheader("Composition Table")
         st.dataframe(res[['category', 'name', 'Ratio %']], use_container_width=True)
-    with right:
-        fig = px.bar(res, x='category', y='Ratio %', color='name', title="Category Distribution")
+    with r:
+        fig = px.pie(res, values='Ratio %', names='name', hole=0.4, title="Mix Design")
         st.plotly_chart(fig)
-
-    st.success("Simulation Complete. Data reflects high-fidelity material correlation.")
