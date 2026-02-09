@@ -1,4 +1,4 @@
-Structural AI Engine v3.0
+
 
 Five-star professional simulation: material physics, manufacturability,
 
