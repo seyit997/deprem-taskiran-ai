@@ -1,118 +1,176 @@
 import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import random
+from deap import base, creator, tools, algorithms
+from tqdm import trange
 import plotly.express as px
 
-st.set_page_config(page_title="SeismoMutate Academic | v4.0", layout="wide")
+# -------------------------------------------------
+# SAYFA AYARLARI
+# -------------------------------------------------
+st.set_page_config(
+    page_title="Adaptive Bio-Inspired Concrete Lab",
+    layout="wide"
+)
 
-# Şık ve Akademik Tema
+st.title("🧬 Evrimsel Adaptif Yapı Malzemesi Laboratuvarı")
 st.markdown("""
-    <style>
-    .reportview-container { background: #f0f2f6; }
-    .stMetric { border-radius: 10px; border: 1px solid #d1d8e0; background: white; padding: 15px !important; }
-    .academic-note { background-color: #fff3cd; padding: 15px; border-radius: 10px; border-left: 5px solid #ffca28; font-style: italic; }
-    </style>
-    """, unsafe_allow_html=True)
+Bu sistem; **doğal, tarihsel ve modern tüm maddeleri** kapsayan  
+**evrimsel adaptasyon algoritması** ile  
+**dayanım – süneklik – self-healing – maliyet** dengesini optimize eder.
+""")
 
-st.title("🔬 SeismoMutate: Biyo-İlhamlı Sismik Karar Destek Sistemi")
-st.caption("Evrimsel Algoritmalar ile Nanokompozit Beton Optimizasyonu")
+# -------------------------------------------------
+# MALZEME SINIFI
+# -------------------------------------------------
+class Material:
+    def __init__(self, name, cost, strength, ductility, healing, brittleness, max_ratio):
+        self.name = name
+        self.cost = cost            # $ / kg
+        self.strength = strength
+        self.ductility = ductility
+        self.healing = healing
+        self.brittleness = brittleness
+        self.max_ratio = max_ratio  # fiziksel üst sınır
 
-# --- PARAMETRELER (GERÇEKÇİ SINIRLAR) ---
-st.sidebar.header("⚙️ Mühendislik Kısıtları")
-target_mw = st.sidebar.slider("Sismik Senaryo (Mw)", 5.0, 9.5, 7.8)
-budget_limit = st.sidebar.slider("Bütçe Katsayısı (Düşük - Yüksek)", 1, 10, 5)
+# -------------------------------------------------
+# MALZEME EVRENİ (GENİŞLETİLEBİLİR)
+# -------------------------------------------------
+materials = [
+    Material("Çimento", 0.12, 1.0, 0.2, 0.0, 0.8, 0.20),
+    Material("Agrega", 0.03, 0.6, 0.1, 0.0, 0.9, 0.75),
+    Material("Su", 0.001, 0.0, 0.3, 0.0, 1.0, 0.20),
 
-# Malzemeler ve Mühendislik Limitleri (Ağırlıkça %)
-# Çimento: %15-25, Agrega: %65-75, Su: %5-10, Polimer: %0.5-5, CNT: %0.01-0.5
-labels = ["Çimento", "Agrega/Kum", "Su", "Stiren-Bütadien Polimer", "Karbon Nanotüp (MWCNT)"]
+    Material("Pirinç Unu (Amiloz)", 0.40, 0.3, 0.6, 0.2, 0.4, 0.05),
+    Material("Nişasta", 0.30, 0.2, 0.5, 0.1, 0.3, 0.04),
+    Material("Selüloz NanoFiber", 2.5, 0.8, 1.0, 0.3, 0.2, 0.02),
+    Material("Lignin", 0.15, 0.4, 0.7, 0.2, 0.3, 0.03),
 
-def run_academic_evolution(gens, mw, budget):
-    pop_size = 100
-    # İlk popülasyon (Kısıtlı rastgelelik)
-    pop = np.random.rand(pop_size, 5)
-    # Gerçekçi başlangıç ağırlıkları
-    pop[:, 0] = 0.20 # Çimento
-    pop[:, 1] = 0.70 # Agrega
-    pop[:, 2] = 0.08 # Su
-    pop[:, 3] = 0.015 # Polimer
-    pop[:, 4] = 0.001 # CNT
-    
+    Material("Uçucu Kül", 0.05, 0.7, 0.4, 0.0, 0.4, 0.15),
+    Material("Metakaolin", 0.25, 1.1, 0.3, 0.0, 0.6, 0.10),
+    Material("Nano Silika", 3.0, 1.4, 0.2, 0.0, 0.7, 0.02),
+
+    Material("SBR Polimer", 1.2, 0.6, 1.3, 0.4, 0.2, 0.04),
+    Material("PVA Lif", 2.0, 0.9, 1.6, 0.5, 0.2, 0.02),
+    Material("CNT", 150.0, 2.5, 1.2, 0.6, 0.1, 0.003),
+]
+
+# -------------------------------------------------
+# SIDEBAR PARAMETRELERİ
+# -------------------------------------------------
+with st.sidebar:
+    st.header("⚙️ Simülasyon Ayarları")
+    population_size = st.slider("Popülasyon", 100, 500, 300, step=50)
+    generations = st.slider("Nesil Sayısı", 500, 3000, 2000, step=250)
+    max_cost = st.slider("Maks. m³ Maliyet ($)", 200, 800, 350, step=25)
+
+# -------------------------------------------------
+# FITNESS FONKSİYONU
+# -------------------------------------------------
+def evaluate(individual):
+    total = sum(individual)
+    if total == 0:
+        return -1e9,
+
+    ratios = np.array(individual) / total
+
+    # Fiziksel sınırlar
+    for r, m in zip(ratios, materials):
+        if r > m.max_ratio:
+            return -1e9,
+
+    strength = ductility = healing = brittleness = cost = 0
+
+    for r, m in zip(ratios, materials):
+        strength += r * m.strength
+        ductility += r * m.ductility
+        healing += r * m.healing
+        brittleness += r * m.brittleness
+        cost += r * m.cost * 2400  # kg/m³
+
+    penalty_brittle = brittleness * 2.5
+    penalty_cost = max(0, cost - max_cost) * 3.0
+
+    fitness = (
+        strength * 3.0 +
+        ductility * 2.5 +
+        healing * 2.0
+        - penalty_brittle
+        - penalty_cost
+    )
+
+    return fitness,
+
+# -------------------------------------------------
+# EVRİM MOTORU
+# -------------------------------------------------
+def run_evolution():
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    toolbox.register("attr", random.random)
+    toolbox.register("individual", tools.initRepeat, creator.Individual,
+                     toolbox.attr, n=len(materials))
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("mate", tools.cxBlend, alpha=0.4)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.08, indpb=0.15)
+    toolbox.register("select", tools.selTournament, tournsize=4)
+
+    pop = toolbox.population(n=population_size)
     history = []
-    for g in range(gens):
-        c, a, s, p, n = pop[:,0], pop[:,1], pop[:,2], pop[:,3], pop[:,4]
-        
-        # 1. Basınç Dayanımı (MPa) tahmini
-        strength_mpa = (c * 200) + (n * 500) - (p * 20)
-        
-        # 2. Süneklik (Ductility) - Deprem için kritik
-        ductility = (p * 50) + (n * 10)
-        
-        # 3. Maliyet Fonksiyonu (CNT ve Polimer cezası)
-        cost = (c * 100) + (p * 1500) + (n * 100000)
-        
-        # FITNESS: Dayanıklılık ve süneklik artsın, maliyet bütçeyi aşmasın
-        fitness = (strength_mpa * 0.4) + (ductility * (mw/4)) - (cost / (budget * 200))
-        
-        # Su/Çimento Oranı Cezası (İdeal: 0.35 - 0.50 arası)
-        w_c_ratio = s / c
-        fitness -= np.abs(0.45 - w_c_ratio) * 100
-        
-        best_idx = np.argmax(fitness)
-        history.append(fitness[best_idx])
-        
-        # Evrim (En iyileri koru, geri kalanı mutasyona uğrat)
-        parents = pop[np.argsort(fitness)[-50:]]
-        mutations = np.random.normal(0, 0.002, parents.shape)
-        offspring = np.clip(parents + mutations, 0.0001, 0.8)
-        pop = np.vstack([parents, offspring])
-        # Normalizasyon (Toplam = 1.0)
-        pop = pop / pop.sum(axis=1)[:, None]
 
-    return pop[np.argmax(fitness)], history, strength_mpa[best_idx], cost[best_idx]
+    progress = st.progress(0)
+    status = st.empty()
 
-if st.button("🧬 Simülasyonu Koştur"):
-    best_recipe, hist, mpa, final_cost = run_academic_evolution(1000, target_mw, budget_limit)
-    
-    st.subheader("🎯 Optimal Çözüm Özeti")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Basınç Dayanımı", f"{mpa:.1f} MPa")
-    c2.metric("Süneklik Katsayısı", f"{best_recipe[3]*100:.2f} μ")
-    c3.metric("Birim Maliyet", f"{int(final_cost/10)} $/m³")
-    c4.metric("Kanser Adaptasyon Etkisi", "Yüksek")
+    for gen in trange(generations):
+        offspring = algorithms.varAnd(pop, toolbox, cxpb=0.5, mutpb=0.3)
+        fits = map(toolbox.evaluate, offspring)
 
-    # --- TABLO VE GRAFİKLER ---
-    col_left, col_right = st.columns([1, 1])
-    
-    with col_left:
-        st.write("**1 m³ (2400 kg) İçin Reçete**")
-        total_kg = 2400
-        df_mix = pd.DataFrame({
-            "Malzeme": labels,
-            "Oran (Ağırlıkça)": [f"% {x*100:.4f}" for x in best_recipe],
-            "Miktar (kg)": [f"{x * total_kg:.2f} kg" for x in best_recipe]
-        })
-        st.table(df_mix)
+        for fit, ind in zip(fits, offspring):
+            ind.fitness.values = fit
 
-    with col_right:
-        st.write("**Gelişmiş Hasar Sönümleme Analizi**")
-        fig = px.line(hist, labels={'value': 'Fitness Skoru', 'index': 'Nesil'}, title="Algoritmik Yakınsama")
-        st.plotly_chart(fig, use_container_width=True)
+        pop = toolbox.select(offspring, k=len(pop))
+        best = tools.selBest(pop, 1)[0]
+        history.append(best.fitness.values[0])
 
-    # --- AKADEMİK SAVUNMA BÖLÜMÜ ---
-    st.markdown("---")
-    st.subheader("📝 Akademik Metodoloji Notları")
-    st.markdown(f"""
-    <div class="academic-note">
-    <b>Not:</b> Bu çalışma, biyolojik adaptasyon sistemlerinden esinlenen sezgisel bir optimizasyon modelidir. 
-    Karbon Nanotüp oranı (<b>%{best_recipe[4]*100:.3f}</b>), literatürdeki 'yüksek performanslı nanokompozit beton' 
-    verileriyle uyumlu hale getirilmiştir. 
-    </div>
-    """, unsafe_allow_html=True)
+        if gen % max(1, generations // 100) == 0:
+            progress.progress(gen / generations)
+            status.text(f"Nesil {gen} | En iyi fitness: {best.fitness.values[0]:.3f}")
 
-    st.info(f"""
-    **Mühendislik Yorumu:**
-    Bu tasarımda, kanser hücrelerinin stres altındaki protein re-organizasyonu; matris içindeki 
-    **SBR Polimer** ({best_recipe[3]*total_kg:.1f} kg) ve **MWCNT** ({best_recipe[4]*total_kg:.2f} kg) 
-    etkileşimiyle simüle edilmiştir. Mw {target_mw} senaryosunda, Nanotüpler 'mikro-köprüleme' yaparak 
-    çatlak yayılımını yavaşlatırken, polimer fazı sismik enerjiyi histeretik sönümleme ile yutar.
-    """)
+    progress.empty()
+    status.empty()
+
+    return tools.selBest(pop, 1)[0], history
+
+# -------------------------------------------------
+# ÇALIŞTIR
+# -------------------------------------------------
+if st.button("🚀 Evrimsel Analizi Başlat"):
+    best, history = run_evolution()
+    ratios = np.array(best) / sum(best)
+
+    df = pd.DataFrame({
+        "Malzeme": [m.name for m in materials],
+        "Oran (%)": np.round(ratios * 100, 4),
+        "kg / m³": np.round(ratios * 2400, 2)
+    })
+
+    st.subheader("🧪 Optimal Karışım")
+    st.dataframe(df)
+
+    fig_pie = px.pie(df, values="Oran (%)", names="Malzeme", hole=0.4)
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+    fig_line = px.line(
+        x=range(len(history)),
+        y=history,
+        labels={"x": "Nesil", "y": "Fitness"}
+    )
+    st.plotly_chart(fig_line, use_container_width=True)
+
+    total_cost = sum(r * m.cost * 2400 for r, m in zip(ratios, materials))
+    st.success(f"💰 Tahmini Gerçekçi Maliyet: {total_cost:.2f} $ / m³")
