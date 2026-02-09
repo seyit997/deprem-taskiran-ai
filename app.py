@@ -6,41 +6,34 @@ from deap import base, creator, tools, algorithms
 import plotly.express as px
 
 # =========================
-# 1. BİLİMSEL VERİ KÜTÜPHANESİ
+# 1. VERİ KÜTÜPHANESİ (HIZLI VE GÜVENLİ)
 # =========================
-def generate_scientific_library(size=2500):
+@st.cache_data
+def get_library(size=2500):
     categories = {
-        "Bağlayıcı": {"s": (0.8, 1.5), "f": (0.1, 0.3), "c": (0.1, 0.2), "d": (2500, 3200), "lim": 0.40},
-        "Agrega": {"s": (0.4, 0.8), "f": (0.05, 0.1), "c": (0.02, 0.05), "d": (2400, 2800), "lim": 0.80},
-        "Nano-Katkı": {"s": (2.0, 5.0), "f": (0.5, 1.5), "c": (2.0, 10.0), "d": (1800, 2300), "lim": 0.05},
-        "Polimer/Lif": {"s": (0.5, 2.0), "f": (2.0, 5.0), "c": (0.5, 3.0), "d": (900, 1400), "lim": 0.08},
-        "Sıvı/Katkı": {"s": (0.1, 0.3), "f": (0.8, 1.2), "c": (0.01, 0.5), "d": (1000, 1100), "lim": 0.25}
+        "Bağlayıcı": {"s": (0.8, 1.5), "f": (0.1, 0.3), "c": (0.1, 0.2), "d": 3100, "lim": 0.50},
+        "Agrega": {"s": (0.4, 0.8), "f": (0.05, 0.1), "c": (0.02, 0.05), "d": 2700, "lim": 0.85},
+        "Nano-Katkı": {"s": (2.0, 5.0), "f": (0.5, 1.5), "c": (2.0, 10.0), "d": 2100, "lim": 0.06},
+        "Polimer/Lif": {"s": (0.5, 2.0), "f": (2.0, 5.0), "c": (0.5, 3.0), "d": 1200, "lim": 0.10},
+        "Sıvı/Katkı": {"s": (0.1, 0.3), "f": (0.8, 1.2), "c": (0.01, 0.5), "d": 1000, "lim": 0.20}
     }
     data = []
+    cat_list = list(categories.keys())
     for i in range(size):
-        cat_name = random.choice(list(categories.keys()))
-        cfg = categories[cat_name]
-        data.append({
-            "name": f"{cat_name}_{i+1}",
-            "category": cat_name,
-            "strength": random.uniform(*cfg["s"]),
-            "flexibility": random.uniform(*cfg["f"]),
-            "cost_per_kg": random.uniform(*cfg["c"]),
-            "density": random.uniform(*cfg["d"]),
-            "max_limit": cfg["lim"]
-        })
-    return pd.DataFrame(data)
+        c = random.choice(cat_list)
+        data.append([
+            f"{c}_{i}", c, random.uniform(*categories[c]["s"]),
+            random.uniform(*categories[c]["f"]), random.uniform(*categories[c]["c"]),
+            categories[c]["d"], categories[c]["lim"]
+        ])
+    return pd.DataFrame(data, columns=["name", "category", "strength", "flex", "cost_kg", "density", "max_lim"])
 
-if 'material_db' not in st.session_state:
-    st.session_state.material_db = generate_scientific_library()
-
-db = st.session_state.material_db
+db = get_library()
+TOP_K = 8
 
 # =========================
-# 2. GENETİK MİMARİ (NSGA-II MANTIĞI)
+# 2. GENETİK YAPI (FIXED)
 # =========================
-TOP_K = 8 
-
 if "FitnessMax" not in creator.__dict__:
     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 if "Individual" not in creator.__dict__:
@@ -48,123 +41,117 @@ if "Individual" not in creator.__dict__:
 
 toolbox = base.Toolbox()
 
-def create_constrained_ind():
-    # BENZERSİZ İNDEKSLER (Sorun 1 Çözüldü)
+def create_ind():
     indices = random.sample(range(len(db)), TOP_K)
     ratios = [random.random() for _ in range(TOP_K)]
     return creator.Individual(indices + ratios)
 
-toolbox.register("individual", create_constrained_ind)
+toolbox.register("individual", create_ind)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
 # =========================
-# 3. FİZİKSEL SİMÜLASYON MOTORU
+# 3. EVALUATE (KEYERROR FİXED)
 # =========================
 def evaluate(individual):
-    indices = individual[:TOP_K]
-    raw_ratios = np.array(individual[TOP_K:])
+    # İndeksleri tam sayıya zorla ve sınırla
+    indices = [int(max(0, min(len(db)-1, x))) for x in individual[:TOP_K]]
+    ratios = np.array(individual[TOP_K:], dtype=float)
     
-    # İndekslerin geçerliliğini kontrol et (IndexError Çözüldü)
-    indices = [int(min(max(0, i), len(db)-1)) for i in indices]
-    selected = db.iloc[indices]
-    
-    # HACİMSEL NORMALİZASYON (Sorun 2 & 3 Çözüldü)
-    # Önce kategori limitlerine göre kırpma
-    norm_ratios = raw_ratios / np.sum(raw_ratios)
+    # Veriyi tek seferde çek (iloc[i]['column'] hatasından kaçınmak için values kullan)
+    sub_df = db.iloc[indices]
+    strengths = sub_df['strength'].values
+    flexibilities = sub_df['flex'].values
+    costs_kg = sub_df['cost_kg'].values
+    densities = sub_df['density'].values
+    limits = sub_df['max_lim'].values
+
+    # 1. Kısıt: Fiziksel Limitler
+    # Oranları normalize etmeden önce limitlere göre kırp
+    ratios = np.clip(ratios, 0, 1)
     for i in range(TOP_K):
-        limit = selected.iloc[i]['max_limit']
-        norm_ratios[i] = min(norm_ratios[i], limit)
+        ratios[i] = min(ratios[i], limits[i])
     
-    # Kalan boşluğu ana bağlayıcı/agrega ile doldur (Hacim = 1 m3)
-    final_ratios = norm_ratios / np.sum(norm_ratios)
-    
-    # PERFORMANS HESABI
-    strength = np.sum(final_ratios * selected['strength'].values) * 100
-    flex = np.sum(final_ratios * selected['flexibility'].values) * 100
-    
-    # GERÇEK MALİYET ($/m3) = Hacim Oranı * Yoğunluk * kg fiyatı
-    cost = np.sum(final_ratios * selected['density'].values * selected['cost_per_kg'].values)
-    
-    # DEPREM DAYANIMI SİMÜLASYONU
-    # Rezonans ve sönümleme kapasitesi (Strength * Flex kombinasyonu)
-    toughness = (strength * 0.7) + (flex * 1.5)
-    quake_resistance = toughness / 15  # Kaç şiddetli deprem?
+    # 2. Hacimsel Normalizasyon (Sum = 1.0 m3)
+    sum_r = np.sum(ratios)
+    if sum_r == 0: return (0,)
+    ratios = ratios / sum_r
 
-    # FITNESS (Sorun 4 Çözüldü)
-    # Dengeli ceza sistemi
-    penalty = 0
-    if cost > 600: penalty += (cost - 600) * 2
-    if strength < 40: penalty += (40 - strength) * 5
+    # 3. Hesaplamalar
+    s_total = np.sum(ratios * strengths) * 100
+    f_total = np.sum(ratios * flexibilities) * 100
+    cost_total = np.sum(ratios * densities * costs_kg)
     
-    score = (strength * 1.2) + (flex * 2.0) + (quake_resistance * 10) - (cost / 10) - penalty
-    return (max(0, score),)
+    # Deprem Simülasyonu (Empirik Formül)
+    toughness = (s_total * 0.6) + (f_total * 1.4)
+    quake_res = toughness / 12
 
-# Mutasyon Fonksiyonu (Index korumalı)
-def custom_mutate(ind):
-    if random.random() < 0.2:
-        idx = random.randint(0, TOP_K-1)
-        ind[idx] = random.randint(0, len(db)-1) # Malzeme değişimi
-    for i in range(TOP_K, 2*TOP_K):
-        if random.random() < 0.1:
-            ind[i] += random.gauss(0, 0.1) # Oran değişimi
-    return ind,
+    # Fitness: Dayanım ve Esnekliği ödüllendir, maliyeti cezalandır
+    score = (s_total * 1.5) + (f_total * 2.5) + (quake_res * 20)
+    score -= (cost_total / 8) # Maliyet baskısı
+    
+    # Ceza: Eğer çok pahalıysa veya dayanım çok düşükse
+    if cost_total > 550: score -= (cost_total - 550) * 3
+    if s_total < 40: score -= 200
+
+    return (max(1, score),)
 
 toolbox.register("evaluate", evaluate)
-toolbox.register("mate", tools.cxTwoPoint)
-toolbox.register("mutate", custom_mutate)
+toolbox.register("mate", tools.cxTwoPoint) # Not: Daha güvenli bir cx için cxUniform denenebilir
+toolbox.register("mutate", tools.mutGaussian, mu=100, sigma=50, indpb=0.1) # İndeksler için geniş mutasyon
 toolbox.register("select", tools.selTournament, tournsize=3)
 
 # =========================
-# 4. DASHBOARD
+# 4. ARAYÜZ
 # =========================
-st.set_page_config(page_title="Professional Materials Lab", layout="wide")
-st.title("🏗️ Akademik Malzeme Tasarımı ve Deprem Simülatörü")
+st.set_page_config(page_title="Pro-Material AI", layout="wide")
+st.title("🛡️ Civil-AI: Profesyonel Malzeme Sentezleyici")
 
+[attachment_0](attachment)
 
-
-col1, col2 = st.columns([1, 3])
+col1, col2 = st.columns([1, 2])
 with col1:
-    st.info("Sistem, 2500 malzeme içinden 1 $m^3$ hacmi dolduracak en optimal 'unique' reçeteyi arar.")
-    pop_size = st.slider("Popülasyon", 100, 500, 300)
-    gens = st.slider("Nesil", 50, 1000, 200)
+    pop_size = st.number_input("Popülasyon", 50, 1000, 300)
+    gens = st.number_input("Nesil", 10, 2000, 100)
+    btn = st.button("🧬 Evrimi Simüle Et")
 
-if st.button("🚀 Evrimsel Analizi Başlat"):
-    with st.spinner("Moleküler ve Statik Dengeler Hesaplanıyor..."):
-        pop = toolbox.population(n=pop_size)
-        hof = tools.HallOfFame(1)
-        stats = tools.Statistics(lambda ind: ind.fitness.values[0])
-        stats.register("max", np.max)
-
-        algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.3, ngen=gens, stats=stats, halloffame=hof, verbose=False)
+if btn:
+    pop = toolbox.population(n=int(pop_size))
+    hof = tools.HallOfFame(1)
+    
+    with st.spinner("Genetik algoritma çaprazlanıyor..."):
+        algorithms.eaSimple(pop, toolbox, 0.7, 0.2, int(gens), halloffame=hof, verbose=False)
 
     best = hof[0]
-    best_indices = [int(min(max(0, i), len(db)-1)) for i in best[:TOP_K]]
-    best_ratios = np.array(best[TOP_K:])
-    best_ratios = best_ratios / np.sum(best_ratios)
-
-    res_df = db.iloc[best_indices].copy()
-    res_df['Hacim Oranı (%)'] = np.round(best_ratios * 100, 2)
+    indices = [int(max(0, min(len(db)-1, x))) for x in best[:TOP_K]]
+    raw_ratios = np.array(best[TOP_K:])
     
-    # SONUÇLAR
+    # Nihai gösterim için tekrar hesapla
+    final_df = db.iloc[indices].copy()
+    limits = final_df['max_lim'].values
+    processed_ratios = np.clip(raw_ratios, 0, 1)
+    for i in range(TOP_K):
+        processed_ratios[i] = min(processed_ratios[i], limits[i])
+    processed_ratios /= np.sum(processed_ratios)
+    
+    final_df['Reçete Oranı (%)'] = processed_ratios * 100
+    
+    # METRİKLER
+    s_f = np.sum(processed_ratios * final_df['strength'].values) * 100
+    f_f = np.sum(processed_ratios * final_df['flex'].values) * 100
+    c_f = np.sum(processed_ratios * final_df['density'].values * final_df['cost_kg'].values)
+    q_f = int(((s_f * 0.6) + (f_f * 1.4)) / 12)
+
     st.divider()
-    c1, c2, c3 = st.columns(3)
-    
-    s_val = np.sum(best_ratios * res_df['strength'].values) * 100
-    f_val = np.sum(best_ratios * res_df['flexibility'].values) * 100
-    cost_val = np.sum(best_ratios * res_df['density'].values * res_df['cost_per_kg'].values)
-    quake_val = ((s_val * 0.7) + (f_val * 1.5)) / 15
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Dayanım", f"{s_f:.1f} MPa")
+    m2.metric("Süneklik", f"{f_f:.1f}")
+    m3.metric("Maliyet", f"${c_f:.2f}/m³")
+    m4.metric("Deprem Ömrü", f"{q_f} Şiddetli Sarsıntı")
 
-    c1.metric("Bileşik Dayanım (MPa)", f"{s_val:.1f}")
-    c2.metric("Süneklik / Elastisite", f"{f_val:.1f}")
-    c3.metric("Deprem Dayanım Ömrü", f"{int(quake_val)} Sarsıntı")
-
-    # GRAFİKLER
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.subheader("📋 Optimal Reçete (1 m³)")
-        st.table(res_df[['category', 'name', 'Hacim Oranı (%)']])
-        st.warning(f"Toplam Tahmini Maliyet: ${cost_val:.2f} / m³")
-
-    with col_right:
-        fig = px.bar(res_df, x='name', y='Hacim Oranı (%)', color='category', title="Malzeme Kompozisyonu")
+    # GÖRSEL
+    c_left, c_right = st.columns(2)
+    with c_left:
+        st.dataframe(final_df[['category', 'name', 'Reçete Oranı (%)']], use_container_width=True)
+    with c_right:
+        fig = px.pie(final_df, values='Reçete Oranı (%)', names='name', hole=0.4, title="Hacimsel Dağılım")
         st.plotly_chart(fig)
