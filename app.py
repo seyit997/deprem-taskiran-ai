@@ -1,11 +1,5 @@
 
 
-Five-star professional simulation: material physics, manufacturability,
-
-evolutionary optimization, time-dependent earthquake damage,
-
-Monte Carlo reliability, adjusted performance score
-
 import streamlit as st import numpy as np import pandas as pd import random from deap import base, creator, tools, algorithms import plotly.express as px
 
 =========================
