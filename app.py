@@ -3,174 +3,134 @@ import numpy as np
 import pandas as pd
 import random
 from deap import base, creator, tools, algorithms
-from tqdm import trange
 import plotly.express as px
 
-# -------------------------------------------------
-# SAYFA AYARLARI
-# -------------------------------------------------
-st.set_page_config(
-    page_title="Adaptive Bio-Inspired Concrete Lab",
-    layout="wide"
-)
+# =========================
+# 1. BÜYÜK VERİ: SENTETİK MALZEME JENERATÖRÜ
+# =========================
+# Doğadaki tüm malzemeleri temsil eden 2000+ maddelik sentetik kütüphane
+def generate_global_material_library(size=2000):
+    categories = ["Bağlayıcı", "Agrega", "Nano-Teknolojik", "Polimer", "Geri Dönüşüm", "Doğal Lif"]
+    data = []
+    for i in range(size):
+        cat = random.choice(categories)
+        data.append({
+            "name": f"{cat}_{i+1}",
+            "category": cat,
+            "strength": random.uniform(0.1, 5.0),    # Dayanım spektrumu
+            "flexibility": random.uniform(0.1, 3.0), # Süneklik spektrumu
+            "cost": random.uniform(0.01, 10.0),      # Ucuz kumdan pahalı CNT'ye
+            "density": random.uniform(500, 4000),    # Hafif beton - Ağır çelik
+            "degradation": random.uniform(0.05, 0.5) # Çevresel bozulma
+        })
+    return pd.DataFrame(data)
 
-st.title("🧬 Evrimsel Adaptif Yapı Malzemesi Laboratuvarı")
-st.markdown("""
-Bu sistem; **doğal, tarihsel ve modern tüm maddeleri** kapsayan  
-**evrimsel adaptasyon algoritması** ile  
-**dayanım – süneklik – self-healing – maliyet** dengesini optimize eder.
-""")
+# Veritabanını oluştur
+if 'material_db' not in st.session_state:
+    st.session_state.material_db = generate_global_material_library(2500)
 
-# -------------------------------------------------
-# MALZEME SINIFI
-# -------------------------------------------------
-class Material:
-    def __init__(self, name, cost, strength, ductility, healing, brittleness, max_ratio):
-        self.name = name
-        self.cost = cost            # $ / kg
-        self.strength = strength
-        self.ductility = ductility
-        self.healing = healing
-        self.brittleness = brittleness
-        self.max_ratio = max_ratio  # fiziksel üst sınır
+db = st.session_state.material_db
 
-# -------------------------------------------------
-# MALZEME EVRENİ (GENİŞLETİLEBİLİR)
-# -------------------------------------------------
-materials = [
-    Material("Çimento", 0.12, 1.0, 0.2, 0.0, 0.8, 0.20),
-    Material("Agrega", 0.03, 0.6, 0.1, 0.0, 0.9, 0.75),
-    Material("Su", 0.001, 0.0, 0.3, 0.0, 1.0, 0.20),
+# =========================
+# 2. GENETİK ALGORİTMA AYARLARI
+# =========================
+# Genetik algoritma "Binlerce madde arasından en iyi 10'luyu seç ve oranla" şeklinde çalışacak
+TOP_K = 12 # Karışımda kullanılacak maksimum farklı madde sayısı
 
-    Material("Pirinç Unu (Amiloz)", 0.40, 0.3, 0.6, 0.2, 0.4, 0.05),
-    Material("Nişasta", 0.30, 0.2, 0.5, 0.1, 0.3, 0.04),
-    Material("Selüloz NanoFiber", 2.5, 0.8, 1.0, 0.3, 0.2, 0.02),
-    Material("Lignin", 0.15, 0.4, 0.7, 0.2, 0.3, 0.03),
-
-    Material("Uçucu Kül", 0.05, 0.7, 0.4, 0.0, 0.4, 0.15),
-    Material("Metakaolin", 0.25, 1.1, 0.3, 0.0, 0.6, 0.10),
-    Material("Nano Silika", 3.0, 1.4, 0.2, 0.0, 0.7, 0.02),
-
-    Material("SBR Polimer", 1.2, 0.6, 1.3, 0.4, 0.2, 0.04),
-    Material("PVA Lif", 2.0, 0.9, 1.6, 0.5, 0.2, 0.02),
-    Material("CNT", 150.0, 2.5, 1.2, 0.6, 0.1, 0.003),
-]
-
-# -------------------------------------------------
-# SIDEBAR PARAMETRELERİ
-# -------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ Simülasyon Ayarları")
-    population_size = st.slider("Popülasyon", 100, 500, 300, step=50)
-    generations = st.slider("Nesil Sayısı", 500, 3000, 2000, step=250)
-    max_cost = st.slider("Maks. m³ Maliyet ($)", 200, 800, 350, step=25)
-
-# -------------------------------------------------
-# FITNESS FONKSİYONU
-# -------------------------------------------------
-def evaluate(individual):
-    total = sum(individual)
-    if total == 0:
-        return -1e9,
-
-    ratios = np.array(individual) / total
-
-    # Fiziksel sınırlar
-    for r, m in zip(ratios, materials):
-        if r > m.max_ratio:
-            return -1e9,
-
-    strength = ductility = healing = brittleness = cost = 0
-
-    for r, m in zip(ratios, materials):
-        strength += r * m.strength
-        ductility += r * m.ductility
-        healing += r * m.healing
-        brittleness += r * m.brittleness
-        cost += r * m.cost * 2400  # kg/m³
-
-    penalty_brittle = brittleness * 2.5
-    penalty_cost = max(0, cost - max_cost) * 3.0
-
-    fitness = (
-        strength * 3.0 +
-        ductility * 2.5 +
-        healing * 2.0
-        - penalty_brittle
-        - penalty_cost
-    )
-
-    return fitness,
-
-# -------------------------------------------------
-# EVRİM MOTORU
-# -------------------------------------------------
-def run_evolution():
+if "FitnessMax" not in creator.__dict__:
     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+if "Individual" not in creator.__dict__:
     creator.create("Individual", list, fitness=creator.FitnessMax)
 
-    toolbox = base.Toolbox()
-    toolbox.register("attr", random.random)
-    toolbox.register("individual", tools.initRepeat, creator.Individual,
-                     toolbox.attr, n=len(materials))
-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+toolbox = base.Toolbox()
+# Birey: [Malzeme_Index_1, Oran_1, Malzeme_Index_2, Oran_2 ...]
+toolbox.register("attr_idx", random.randint, 0, len(db) - 1)
+toolbox.register("attr_float", random.random)
 
-    toolbox.register("evaluate", evaluate)
-    toolbox.register("mate", tools.cxBlend, alpha=0.4)
-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.08, indpb=0.15)
-    toolbox.register("select", tools.selTournament, tournsize=4)
+def create_individual():
+    ind = []
+    for _ in range(TOP_K):
+        ind.append(random.randint(0, len(db) - 1)) # Malzeme seçimi
+        ind.append(random.random())               # Miktar
+    return creator.Individual(ind)
 
-    pop = toolbox.population(n=population_size)
-    history = []
+toolbox.register("individual", create_individual)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-    progress = st.progress(0)
-    status = st.empty()
+# =========================
+# 3. HIZLI FİZİKSEL DEĞERLENDİRME (Vektörize)
+# =========================
+def evaluate(individual):
+    indices = individual[0::2]
+    raw_ratios = np.array(individual[1::2])
+    ratios = raw_ratios / np.sum(raw_ratios)
+    
+    # Seçilen malzemelerin verilerini çek
+    selected_materials = db.iloc[indices]
+    
+    # Performans hesaplama (Matris çarpımı hızıyla)
+    strength = np.sum(ratios * selected_materials['strength'].values) * 100
+    flex = np.sum(ratios * selected_materials['flexibility'].values) * 100
+    cost = np.sum(ratios * selected_materials['cost'].values * selected_materials['density'].values)
+    degradation = np.sum(ratios * selected_materials['degradation'].values) * 50
 
-    for gen in trange(generations):
-        offspring = algorithms.varAnd(pop, toolbox, cxpb=0.5, mutpb=0.3)
-        fits = map(toolbox.evaluate, offspring)
+    # Hedefler
+    cost_penalty = max(0, cost - 500) * 5
+    fitness = (min(strength, 150) * 2) + (min(flex, 100) * 1.5) - degradation - cost_penalty
+    
+    return (max(0, fitness),)
 
-        for fit, ind in zip(fits, offspring):
-            ind.fitness.values = fit
+toolbox.register("evaluate", evaluate)
+toolbox.register("mate", tools.cxTwoPoint)
+toolbox.register("mutate", tools.mutGaussian, mu=0.5, sigma=0.2, indpb=0.1)
+toolbox.register("select", tools.selTournament, tournsize=4)
 
-        pop = toolbox.select(offspring, k=len(pop))
-        best = tools.selBest(pop, 1)[0]
-        history.append(best.fitness.values[0])
+# =========================
+# 4. ARAYÜZ
+# =========================
+st.set_page_config(page_title="Global Malzeme Evrimi", layout="wide")
+st.title("🌐 Global Evrimsel Malzeme Sentezleyici")
+st.write(f"Şu anda veritabanında **{len(db)}** farklı madde (doğal ve sentetik) taranıyor.")
 
-        if gen % max(1, generations // 100) == 0:
-            progress.progress(gen / generations)
-            status.text(f"Nesil {gen} | En iyi fitness: {best.fitness.values[0]:.3f}")
 
-    progress.empty()
-    status.empty()
 
-    return tools.selBest(pop, 1)[0], history
+col_a, col_b = st.columns(2)
+pop_size = col_a.slider("Popülasyon Genişliği", 200, 1000, 500)
+gens = col_b.slider("Simülasyon Derinliği (Nesil)", 100, 2000, 500)
 
-# -------------------------------------------------
-# ÇALIŞTIR
-# -------------------------------------------------
-if st.button("🚀 Evrimsel Analizi Başlat"):
-    best, history = run_evolution()
-    ratios = np.array(best) / sum(best)
+if st.button("🧬 Binlerce Madde İçinde Evrimi Başlat"):
+    with st.spinner("Yapay zeka doğadaki elementleri kombine ediyor..."):
+        pop = toolbox.population(n=pop_size)
+        hof = tools.HallOfFame(1)
+        
+        algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, ngen=gens, halloffame=hof, verbose=False)
 
-    df = pd.DataFrame({
-        "Malzeme": [m.name for m in materials],
-        "Oran (%)": np.round(ratios * 100, 4),
-        "kg / m³": np.round(ratios * 2400, 2)
-    })
+    # Sonuçları İşle
+    best = hof[0]
+    best_indices = best[0::2]
+    best_ratios = np.array(best[1::2])
+    best_ratios = best_ratios / np.sum(best_ratios)
+    
+    res_df = db.iloc[best_indices].copy()
+    res_df['Karışım Oranı (%)'] = np.round(best_ratios * 100, 2)
+    
+    # Grafik ve Tablo
+    st.subheader("🏆 Evrim Sonucu Oluşan En Güçlü Hibrit Karışım")
+    
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.write(res_df[['name', 'category', 'Karışım Oranı (%)']])
+    with c2:
+        fig = px.sunburst(res_df, path=['category', 'name'], values='Karışım Oranı (%)', title="Malzeme Dağılımı")
+        st.plotly_chart(fig)
 
-    st.subheader("🧪 Optimal Karışım")
-    st.dataframe(df)
-
-    fig_pie = px.pie(df, values="Oran (%)", names="Malzeme", hole=0.4)
-    st.plotly_chart(fig_pie, use_container_width=True)
-
-    fig_line = px.line(
-        x=range(len(history)),
-        y=history,
-        labels={"x": "Nesil", "y": "Fitness"}
-    )
-    st.plotly_chart(fig_line, use_container_width=True)
-
-    total_cost = sum(r * m.cost * 2400 for r, m in zip(ratios, materials))
-    st.success(f"💰 Tahmini Gerçekçi Maliyet: {total_cost:.2f} $ / m³")
+    # Performans Metrikleri
+    st.divider()
+    m1, m2, m3 = st.columns(3)
+    final_strength = np.sum(best_ratios * res_df['strength'].values) * 100
+    final_flex = np.sum(best_ratios * res_df['flexibility'].values) * 100
+    final_cost = np.sum(best_ratios * res_df['cost'].values * res_df['density'].values)
+    
+    m1.metric("Bileşik Dayanım", f"{final_strength:.2f} MPa")
+    m2.metric("Süneklik Katsayısı", f"{final_flex:.2f}")
+    m3.metric("Tahmini Maliyet", f"${final_cost:.2f} /m³")
